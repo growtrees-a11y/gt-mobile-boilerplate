@@ -1,0 +1,11 @@
+# PROJ-07: Open Idea Mobile App Boilerplate
+#
+# Core (stdlib)
+#   asyncio, json, datetime, typing  – all in stdlib, no install needed
+#
+# Testing
+pytest>=7.0
+
+# Dev / linting (optional)
+# black
+# isort
