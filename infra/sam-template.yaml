@@ -1,0 +1,158 @@
+# AWS SAM Template — Mobile Telemetry (Serverless Path)
+#
+# Deploy: sam deploy --guided
+#
+# Stack creates:
+#   - API Gateway (REST) → Lambda → DynamoDB
+#   - DynamoDB table with TTL for event retention
+#   - IAM role with DynamoDB write permissions
+#
+# Environment variables:
+#   TELEMETRY_TABLE — DynamoDB table name (auto-created)
+#   REGION — AWS region
+#
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Mobile Telemetry Ingestion — Serverless Path B
+  API Gateway → Lambda → DynamoDB
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        TELEMETRY_TABLE: !Ref TelemetryTable
+        REGION: !Ref AWS::Region
+
+Resources:
+  # ─── Telemetry Ingest Lambda ───────────────────────────────────
+  TelemetryIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda_handler.lambda_handler
+      CodeUri: ../
+      Description: Mobile telemetry ingest — burst write handler
+      Events:
+        IngestApi:
+          Type: Api
+          Properties:
+            Path: /telemetry
+            Method: POST
+            Cors:
+              AllowMethods: "'POST,OPTIONS'"
+              AllowHeaders: "'Content-Type,X-Api-Key'"
+              AllowOrigin: "'*'"
+
+  # ─── Batch Ingest Lambda (for offline queue dumps) ────────────
+  BatchIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: lambda_handler.lambda_handler
+      CodeUri: ../
+      Description: Batch telemetry ingest for offline queue dumps
+      MemorySize: 512
+      Timeout: 60
+      Events:
+        BatchApi:
+          Type: Api
+          Properties:
+            Path: /telemetry/batch
+            Method: POST
+            Cors:
+              AllowMethods: "'POST,OPTIONS'"
+              AllowHeaders: "'Content-Type,X-Api-Key'"
+              AllowOrigin: "'*'"
+        SqsBatch:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SqsTelemetryQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+
+  # ─── DynamoDB Table ─────────────────────────────────────────────
+  TelemetryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: mobile-telemetry-events
+      AttributeDefinitions:
+        - AttributeName: device_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: device_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: PROJ-07
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ─── SQS Dead Letter Queue ─────────────────────────────────────
+  SqsTelemetryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: telemetry-ingest
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600
+      RedriveAllowPolicy:
+        redriveAllowOrDeny: "Allow"
+        sourceQueueArnRegex: ".*"
+      Tags:
+        - Key: Project
+          Value: PROJ-07
+
+  # ─── Lambda Invoke Permission ──────────────────────────────────
+  TelemetryIngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                Resource: !GetAtt TelemetryTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt SqsTelemetryQueue.Arn
+
+Outputs:
+  TelemetryApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  TelemetryTableName:
+    Description: DynamoDB table name
+    Value: !Ref TelemetryTable
+  SqsQueueUrl:
+    Description: SQS queue URL for offline dumps
+    Value: !Ref SqsTelemetryQueue

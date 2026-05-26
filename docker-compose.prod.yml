@@ -1,0 +1,73 @@
+# docker-compose.prod.yml
+#
+# Production overrides — high-replicas ingest + serverless path
+#
+# Combine with base compose:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+
+services:
+  # ─── High-replica API ────────────────────────────────────────────
+  api:
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    environment:
+      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BACKEND=redis://redis:6379/1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ─── Redis — production config ──────────────────────────────────
+  redis:
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── High-concurrency worker ────────────────────────────────────
+  worker:
+    command: celery -A celery_app.app worker --loglevel=info --concurrency=16 --prefetch-multiplier=10
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # ─── DynamoDB Local (for Lambda path testing) ──────────────────
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data"
+
+volumes:
+  dynamodb-data:

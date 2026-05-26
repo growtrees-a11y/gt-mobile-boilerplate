@@ -1,0 +1,57 @@
+# docker-compose.yml
+#
+# Mobile Telemetry Ingestion — Development Environment
+#
+# Path A: FastAPI + Redis Queue (self-hosted)
+#
+
+services:
+  # ─── FastAPI ingest endpoint ────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: on-failure
+
+  # ─── Redis — telemetry event queue ─────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - redis-data:/data
+
+  # ─── Celery worker — processes queued telemetry events ──────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A celery_app.app worker --loglevel=info --concurrency=8
+    environment:
+      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  redis-data:
